@@ -45,8 +45,11 @@ export async function POST(request: Request) {
   console.log(body.orgId);
 
   try {
+    console.log(`[RegisterPeer] Processing request for orgId: ${body.orgId}, peerId: ${body.peerId}`);
+    
     const user = getUser(body.orgId);
     if (!user) {
+      console.log(`[RegisterPeer] User not found for orgId: ${body.orgId}`);
       return NextResponse.json(
         { error: "user not found" },
         {
@@ -54,8 +57,11 @@ export async function POST(request: Request) {
         },
       );
     }
+    console.log(`[RegisterPeer] Found user with address: ${user.address}`);
+
     const apiKey = getLatestApiKey(body.orgId);
     if (!apiKey) {
+      console.log(`[RegisterPeer] API key not found for orgId: ${body.orgId}`);
       return NextResponse.json(
         { error: "api key not found" },
         {
@@ -63,22 +69,30 @@ export async function POST(request: Request) {
         },
       );
     }
+    console.log(`[RegisterPeer] Retrieved API key for user`);
+
     const transport = alchemy({
       apiKey: process.env.NEXT_PUBLIC_ALCHEMY_API_KEY!,
     });
+    console.log(`[RegisterPeer] Initialized Alchemy transport`);
 
+    console.log(`[RegisterPeer] Creating modular account for user address: ${user.address}`);
     const account = await createModularAccountV2({
       transport,
       chain: gensynTestnet,
       signer: createSignerForUser(user, apiKey),
     });
+    console.log(`[RegisterPeer] Created modular account with address: ${account.address}`);
 
+    console.log(`[RegisterPeer] Initializing Alchemy Smart Account client`);
     const client = createAlchemySmartAccountClient({
       account,
       chain: gensynTestnet,
       transport,
       policyId: process.env.NEXT_PUBLIC_PAYMASTER_POLICY_ID!,
     });
+    console.log(`[RegisterPeer] Initialized Smart Account client with policy ID: ${process.env.NEXT_PUBLIC_PAYMASTER_POLICY_ID}`);
+
 
     // Check if the user's address already registered for better error handling.
     /*
@@ -122,33 +136,38 @@ export async function POST(request: Request) {
     */
 
     const contractAdrr = process.env.SMART_CONTRACT_ADDRESS! as `0x${string}`;
-    console.log(contractAdrr);
+    console.log(`[RegisterPeer] Using smart contract address: ${contractAdrr}`);
 
+    console.log(`[RegisterPeer] Preparing to send registerPeer operation with peerId: ${body.peerId}`);
+    const functionData = encodeFunctionData({
+      abi: [
+        {
+          name: "registerPeer",
+          type: "function",
+          inputs: [
+            {
+              name: "peerId",
+              type: "string",
+              internalType: "string",
+            },
+          ],
+          outputs: [],
+          stateMutability: "nonpayable",
+        },
+      ],
+      functionName: "registerPeer",
+      args: [body.peerId],
+    });
+    console.log(`[RegisterPeer] Encoded function data: ${functionData}`);
+
+    console.log(`[RegisterPeer] Sending user operation...`);
     const { hash } = await client.sendUserOperation({
       uo: {
         target: contractAdrr,
-        data: encodeFunctionData({
-          abi: [
-            {
-              name: "registerPeer",
-              type: "function",
-              inputs: [
-                {
-                  name: "peerId",
-                  type: "string",
-                  internalType: "string",
-                },
-              ],
-              outputs: [],
-              stateMutability: "nonpayable",
-            },
-          ],
-          functionName: "registerPeer",
-          args: [body.peerId],
-        }),
+        data: functionData,
       },
     });
-
+    console.log(`[RegisterPeer] User operation sent successfully with hash: ${hash}`);
     return NextResponse.json(
       {
         hash,
@@ -172,16 +191,24 @@ function createSignerForUser(
   user: { orgId: string; address: string },
   apiKey: { publicKey: string; privateKey: string },
 ) {
+  console.log(`[RegisterPeer] Creating signer for user with orgId: ${user.orgId}, address: ${user.address}`);
+  
   const stamper = new ApiKeyStamper({
     apiPublicKey: apiKey.publicKey,
     apiPrivateKey: apiKey.privateKey,
   });
+  console.log(`[RegisterPeer] Initialized ApiKeyStamper`);
+  
   const tk = new TurnkeyClient({ baseUrl: TURNKEY_BASE_URL }, stamper);
+  console.log(`[RegisterPeer] Created TurnkeyClient with base URL: ${TURNKEY_BASE_URL}`);
 
   const signMessage = async (message: SignableMessage) => {
+    console.log(`[RegisterPeer] Starting message signing process`);
     const payload = hashMessage(message);
+    console.log(`[RegisterPeer] Generated message hash payload`);
 
     // Sign with the api key stamper first.
+    console.log(`[RegisterPeer] Preparing Turnkey sign request for address: ${user.address}`);
     const stampedRequest = await tk.stampSignRawPayload({
       organizationId: user.orgId,
       timestampMs: Date.now().toString(),
@@ -193,8 +220,10 @@ function createSignerForUser(
         hashFunction: "HASH_FUNCTION_NO_OP",
       },
     });
+    console.log(`[RegisterPeer] Successfully stamped sign request with Turnkey`);
 
     // Then submit to Alchemy.
+    console.log(`[RegisterPeer] Submitting stamped request to Alchemy for signing`);
     const alchemyResp = await fetch(
       `${ALCHEMY_BASE_URL}/signer/v1/sign-payload`,
       {
@@ -210,14 +239,17 @@ function createSignerForUser(
       },
     );
     if (!alchemyResp.ok) {
-      console.error(await alchemyResp.text());
+      const errorText = await alchemyResp.text();
+      console.error(`[RegisterPeer] Alchemy sign request failed: ${errorText}`);
       throw new Error("Alchemy sign request failed");
     }
 
     const respJson = (await alchemyResp.json()) as { signature: Hex };
+    console.log(`[RegisterPeer] Successfully obtained signature from Alchemy`);
     return respJson.signature;
   };
 
+  console.log(`[RegisterPeer] Creating signer account with address: ${user.address}`);
   const signerAccount = toAccount({
     address: user.address as Address,
     signMessage: async ({ message }) => {
@@ -231,6 +263,7 @@ function createSignerForUser(
     },
   });
 
+  console.log(`[RegisterPeer] Creating wallet client with Alchemy transport`);
   const walletClient = createWalletClient({
     account: signerAccount,
     chain: gensynTestnet,
@@ -239,5 +272,6 @@ function createSignerForUser(
     }),
   });
 
+  console.log(`[RegisterPeer] Returning WalletClientSigner instance`);
   return new WalletClientSigner(walletClient, "custom");
 }
